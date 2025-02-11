@@ -1,0 +1,518 @@
+---
+title: "CC.trans.prob"
+output: html_notebook
+---
+
+This markdown was generated from Mike Lloyd's "cc.trans.prob.R" R script he emailed me after we discussed my need for CC specific transition probability files in order to complete the GBRS functions to generate diplotypes for CC/CC-RIX allele-specific-expression.
+
+**Load Packages**
+
+```{r}
+library(rtracklayer)
+ library(optparse)
+ library(dplyr)
+ library(rhdf5)
+ library(parallel)
+library(dplyr)
+library(testthat)
+library(reticulate)  # For reading NPZ files
+library(tidyverse)   # For data manipulation and visualization
+library(pheatmap)    # For creating heatmaps
+library(Matrix)      # For matrix operations
+library(reshape2)
+library(biomaRt)
+library(mmconvert)
+```
+
+```{r}
+# Mike Lloyd's original code 
+### "couldn’t complete the script for all genes, nor did I try to extend from 8 to 36 state matrices" 
+
+cc.trans.probs_2 = function(snps, chr = c(1:19, "X")) {
+
+  if(chr != 'X') {
+
+    curr.snps = which(snps[,2] == chr)
+    retval = array(0, c(length(1:8), length(1:8), length(curr.snps) - 1), dimnames =
+                     list(c('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'), c('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'), genes[curr.snps[-1], 1]))
+    r = diff(snps[curr.snps, 4]) * 1e-8
+    r[r == 0] = 1e-8  # We can't have zero values here, so set them very small.
+
+    for(s in 1:(length(curr.snps)-1)) {
+      # // equations are from Broman (2005) Genetics 169:1133-1146
+      # //    doi:10.1534/genetics.104.035212
+      # //    see bottom equation in right column on page 1137
+      # //    (need to multiply by 8 to get conditional probabilities,
+      # //     and note that there was an error in the i != j case)
+      retval[,,s] = log(r[s]) - log(1.0 + 6.0 * r[s])
+      diag(retval[,,s]) = log(1.0 - r[s]) - log(1.0 + 6.0 * r[s])
+    } # for s in genes/snps
+
+  } else { # no-autosomal genes
+    # // X chr; need to use founder order
+    # // equations are from Broman (2005) Genetics 169:1133-1146
+    # //    doi:10.1534/genetics.104.035212
+    # //    see table 4 page 1137
+    # //    (need to multiply by the marginal probability, 1/6 or 1/3,
+    # //     to get these conditional probabilities)
+
+    curr.snps = which(snps[,2] == chr)
+
+    print(curr.snps)
+
+    retval = array(0, c(length(1:5), length(1:5), length(curr.snps) - 1), dimnames =
+                     list(c('A', 'B', 'C', 'E', 'F'), c('A', 'B', 'C', 'E', 'F'), genes[curr.snps[-1], 1]))
+
+    ## // X chromosome (can be A, B, C, E, F but not D, G, H) https://github.com/rqtl/qtl2/blob/main/src/cross_risib8.cpp#L28C10-L28C66
+    genotype <- c('A', 'B', 'C', 'E', 'F')
+
+    r = diff(snps[curr.snps, 4]) * 1e-8
+    r[r == 0] = 1e-8  # We can't have zero values here, so set them very small.
+    for(s in 1:(length(curr.snps)-1)) {
+      for (i in 1:nrow(retval[,,s])) {
+        for (j in 1:ncol(retval[,,s])){
+          # row == column
+          if (genotype[i] == genotype[j]) {
+            # check if 'C' genotype as conditonal prob differs in this case
+            if (genotype[i] == genotype[3]) {
+              retval[,,s][i,j] = - log(1.0 + 4.0 * r[s])
+              # else use the following diagonal
+            } else {
+              retval[,,s][i,j] = log(1.0 - r[s]) - log(1.0 + 4.0 * r[s])
+            }
+            ## If col == 'C'
+          } else if (genotype[j] == genotype[3]) {
+            retval[,,s][i,j] = log(2.0) + log(r[s]) - log(1.0 + 4.0 * r[s])
+            ## Else fill the matrix
+          } else {
+            retval[,,s][i,j] = log(r[s]) - log(1.0 + 4.0 * r[s])
+          }
+        }
+      }
+    } # for s in genes/snps
+  }
+  return(retval)
+}
+
+genes <- data.frame(marker = c('ENSMUSG00000102693', 'ENSMUSG00000064842', 'ENSMUSG00000051951', 'ENSMUSG00000102612', 'ENSMUSG00000064842', 'ENSMUSG00000051951'),
+                    chr = c('1', '1', '1', 'X', 'X', 'X'),
+                    pos = c(3143476, 3172239, 3276124, 3143476, 3172239, 3276124),
+                    cM = c(0.0725, 0.0871, 0.1376, 0.0725, 0.0871, 0.1376))
+
+
+#cc.trans.probs_2(genes,  chr="1")
+
+cc.trans.probs_2(genes,  chr="X")
+
+```
+
+## 1. Load in annotation
+
+```{r}
+# oddly, only the Ensemble v105 isn't working.. its even dead on their website, while all other archived versions are fine 
+
+#option_list = list(
+   # make_option(c("-e", "--ensembl_build"), type="character", default="105", 
+              #help="Ensembl build version [default= %default]", metavar="105"),
+   # make_option(c("-g", "--num_generation"), type="character", default="100",
+            #  help="Number of generations to calculate [default= %default]"),
+   # make_option(c("-o", "--output_prefix"), type="character", default="tranprob.genes.DO.", 
+             # help="output prefix [default= %default]")
+#); 
+
+#opt_parser = OptionParser(option_list=option_list);
+#opt = parse_args(opt_parser);
+
+#Sys.setenv(BIOMART_CACHE=tempdir())
+
+################################################################################
+
+## Obtain geneIDs, and positions from biomaRt.
+
+#ensembl_mart <- useEnsembl(biomart = 'genes',
+                        #dataset = 'mmusculus_gene_ensembl',
+                       # version = opt$ensembl_build,
+                       # mirror = "uswest") 
+                        ## note: I have seen issues with timeout: "Error in curl::curl_fetch_memory(url, handle = handle) : Timeout was reached: [www.ensembl.org:443] Operation timed out after 10001 milliseconds with 0 bytes received"
+                        ##       useast seems to be more stable. Other options are: useast, uswest, asia, and www. A try/except catch could be added to retry on a different mirror if this is a highly recurrent issue. 
+
+#attributes <- searchAttributes(mart = ensembl_mart)
+
+#genes.with.id=getBM(attributes=c("ensembl_gene_id", "chromosome_name", "start_position", "end_position", "strand", "external_gene_name", "gene_biotype"), mart = ensembl_mart)
+
+# Save the dataframe as an RDS file
+#saveRDS(genes.with.id, file = "genes_with_id.rds")
+# Load the dataframe from the RDS file
+genes.with.id <- readRDS("genes_with_id.rds") # this directly reads in 105 
+
+```
+
+## 2. Prepare DF
+
+```{r}
+#Prepping the DF 
+#gene_bp_to_cM_to_transprob.R
+
+## Convert bp to cM positions using mmconvert.
+
+valid_chr = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 'X')
+
+input_df <- genes.with.id %>%
+              dplyr::filter(chromosome_name %in% valid_chr) %>%
+              dplyr::rename(marker = ensembl_gene_id, chr = chromosome_name, pos = start_position) %>%
+              dplyr::select(chr, pos, marker)
+## mmconvert requires the columns: c(chr, pos, marker).
+
+table(genes.with.id$chromosome_name)
+## check gene counts by chr.
+table(input_df$chr)
+## check gene counts by chr.
+
+converted_df <- mmconvert(input_df, input_type = 'bp')
+## convert to cM from bp
+
+jittered_converted_df <- converted_df %>%
+                          dplyr::mutate(cM = round(ifelse(is.na(cM_coxV3_ave), cM_coxV3_female, cM_coxV3_ave), digits = 4)) %>%
+                                          # catch cases where average cM isn't present (e.g., chrX)
+                          dplyr::arrange(chr, cM) %>%
+                          group_by(chr, cM) %>%
+                                          # sort on chr and position (i.e., cM)
+                          dplyr::mutate(group_count = n(), row_num = row_number() - 1) %>%
+                          dplyr::mutate(jittered_cM = cM + (0.000001 * (row_number() - 1))) %>%
+                                          # set a jitter cM value. Where a constant is added to sequential members of the group. Corrects for genes with identical positions.
+                          ungroup() %>%
+                          dplyr::arrange(chr, jittered_cM) %>%
+                          as.data.frame()
+## Jitter cM positions that are identical.
+
+#Note: this is where they combined with Y/MT, but inbred CC have consistent Y/MT, so not necessary to include 
+valid_chr_jittered <- jittered_converted_df %>% dplyr::select(marker, chr, bp_grcm39, jittered_cM) %>% dplyr::rename(pos = bp_grcm39)
+
+#write.table(valid_chr_jittered, file = paste0('gene_list_ensemblBuild_', opt$ensembl_build,".tsv"), sep="\t", row.names = FALSE, quote=FALSE)
+
+# First rename valid_chr_jittered to snps for consistency with our functions
+snps <- valid_chr_jittered %>%
+        dplyr::rename(cM = jittered_cM)  # rename to match expected column name
+```
+
+## 3. CC Transition Probability Calculations
+
+```{r}
+cc.trans.probs_2 = function(snps, chr = c(1:19, "X"), sex = c("F", "M")) {
+  curr.snps = which(snps$chr == chr)
+  
+  if(chr != 'X') {
+    # Autosomal chromosomes - 8x8 matrix
+    retval = array(0, c(length(1:8), length(1:8), length(curr.snps) - 1), 
+                   dimnames = list(c('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'),
+                                 c('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'),
+                                 snps$marker[curr.snps[-1]]))  # Changed from genes to snps$marker
+    r = diff(snps$cM[curr.snps]) * 1e-8  # Changed to use cM column directly
+    r[r == 0] = 1e-8
+    
+    for(s in 1:(length(curr.snps)-1)) {
+      retval[,,s] = log(r[s]) - log(1.0 + 6.0 * r[s])
+      diag(retval[,,s]) = log(1.0 - r[s]) - log(1.0 + 6.0 * r[s])
+    }
+  } else {
+    # X chromosome - 5x5 matrix for both sexes
+    retval = array(0, c(length(1:5), length(1:5), length(curr.snps) - 1), 
+                   dimnames = list(c('A', 'B', 'C', 'E', 'F'),
+                                 c('A', 'B', 'C', 'E', 'F'),
+                                 snps$marker[curr.snps[-1]]))  # Changed from genes to snps$marker
+    genotype <- c('A', 'B', 'C', 'E', 'F')
+    r = diff(snps$cM[curr.snps]) * 1e-8  # Changed to use cM column directly
+    r[r == 0] = 1e-8
+    
+    for(s in 1:(length(curr.snps)-1)) {
+      if(sex == "F") {
+        # Female X chromosome calculations
+         # Female X chromosome - inherited from both parents
+        for (i in 1:nrow(retval[,,s])) {
+          for (j in 1:ncol(retval[,,s])) {
+            if (genotype[i] == genotype[j]) {
+              if (genotype[i] == genotype[3]) {
+                retval[,,s][i,j] = - log(1.0 + 4.0 * r[s])
+              } else {
+                retval[,,s][i,j] = log(1.0 - r[s]) - log(1.0 + 4.0 * r[s])
+              }
+            } else if (genotype[j] == genotype[3]) {
+              retval[,,s][i,j] = log(2.0) + log(r[s]) - log(1.0 + 4.0 * r[s])
+            } else {
+              retval[,,s][i,j] = log(r[s]) - log(1.0 + 4.0 * r[s])
+            }
+          }
+        }
+      } else {
+        # Male X chromosome calculations
+        # Simpler transition probabilities due to hemizygosity
+        # Male X chromosome - inherited only from mother
+        for (i in 1:nrow(retval[,,s])) {
+          for (j in 1:ncol(retval[,,s])) {
+            if (genotype[i] == genotype[j]) {
+              retval[,,s][i,j] = log(1.0 - r[s])
+            } else {
+              retval[,,s][i,j] = log(r[s]) - log(4.0)
+            }
+          }
+        }
+      }
+    }
+  }
+  return(retval)
+}
+```
+
+```{r}
+# generate 8x8 for autosomes and 5x5 for X chromo h5 output files 
+
+generate_female_transprobs <- function(snps) { 
+  chromosomes = c(1:19, "X")
+  h5file = 'tranprob.CC.G20.F.h5'
+  h5createFile(h5file)
+  sex = "F"
+  
+  for(chr in chromosomes) {
+    # Get transition probabilities for this chromosome
+    tprobs = cc.trans.probs_2(snps, chr=chr, sex=sex)
+    # Write to h5 file using chromosome:generation:sex naming convention
+    h5write(tprobs, file=h5file, name=paste(chr, "20", sex, sep=":"))
+  }
+}
+
+generate_male_transprobs <- function(snps) { 
+  chromosomes = c(1:19, "X")
+  h5file = 'tranprob.CC.G20.M.h5'
+  h5createFile(h5file)
+  sex = "M"
+  
+  for(chr in chromosomes) {
+    # Get transition probabilities for this chromosome
+    tprobs = cc.trans.probs_2(snps, chr=chr, sex=sex)
+    # Write to h5 file using chromosome:generation:sex naming convention
+    h5write(tprobs, file=h5file, name=paste(chr, "20", sex, sep=":"))
+  }
+}
+
+# Run both functions
+generate_female_transprobs(snps)
+generate_male_transprobs(snps)
+```
+
+## 4. 8x8 QC
+
+```{python}
+#QC
+
+import h5py
+import numpy as np
+
+def analyze_cc_h5(cc_file, chromosome):
+    """
+    Analyze CC transition probability h5 files before parsing/expansion.
+    
+    Args:
+        cc_file: Path to CC transition probability h5 file
+        chromosome: Chromosome identifier (1-19 or X)
+    """
+    try:
+        # Open h5 file
+        with h5py.File(cc_file, 'r') as cc_h5:
+            # Get the dataset for the specified chromosome
+            cc_key = f"{chromosome}:20:F"  # Assuming generation 20, female
+            cc_array = cc_h5[cc_key][:]
+            
+            # Basic array analysis
+            print(f"\nChromosome {chromosome} - Original CC H5 File:")
+            print(f"Array shape: {cc_array.shape}")
+            
+            # Expected matrix size varies by chromosome
+            expected_size = 5 if chromosome == 'X' else 8
+            if cc_array.shape[1] != expected_size or cc_array.shape[2] != expected_size:
+                print(f"WARNING: Expected {expected_size}x{expected_size} matrices, got {cc_array.shape[1]}x{cc_array.shape[2]}")
+            
+            # Value distribution analysis
+            print("\nValue ranges:")
+            print(f"min: {np.min(cc_array):.4f}")
+            print(f"max: {np.max(cc_array):.4f}")
+            print(f"mean: {np.mean(cc_array):.4f}")
+            
+            print("\nPercentiles:")
+            for p in [0, 25, 50, 75, 100]:
+                print(f"{p}th percentile: {np.percentile(cc_array, p):.4f}")
+            
+            # Diagonal analysis
+            diag_values = np.array([arr[np.diag_indices(expected_size)] for arr in cc_array])
+            print("\nDiagonal elements:")
+            print(f"mean: {np.mean(diag_values):.4f}")
+            print(f"std: {np.std(diag_values):.4f}")
+            
+            # Sample first position diagonal values
+            print("\nFirst position diagonal values:")
+            print(diag_values[0])
+            
+            # Sample full matrix at first position
+            print("\nFull matrix at first position:")
+            print(cc_array[0])
+            
+            # Check for invalid values
+            print("\nInvalid values check:")
+            print(f"Inf values present: {np.isinf(cc_array).any()}")
+            print(f"NaN values present: {np.isnan(cc_array).any()}")
+            
+            # Check matrix properties
+            print("\nMatrix properties:")
+            # Sum of each row/column should be close to 1 in probability space
+            first_pos_matrix = np.exp(cc_array[0])  # Convert from log space
+            row_sums = np.sum(first_pos_matrix, axis=1)
+            col_sums = np.sum(first_pos_matrix, axis=0)
+            print(f"Row sums (should be close to 1): {row_sums}")
+            print(f"Column sums (should be close to 1): {col_sums}")
+            
+            # Symmetry check
+            sym_diff = np.max(np.abs(cc_array - np.transpose(cc_array, (0, 2, 1))))
+            print(f"\nSymmetry check (should be close to 0): {sym_diff:.4e}")
+            
+            print("------------------------")
+            
+    except Exception as e:
+        print(f"Error processing chromosome {chromosome}: {str(e)}")
+
+# Run analysis for autosomes and X chromosome
+chromosomes = [str(i) for i in range(1, 20)] + ['X']
+
+print("Analyzing CC h5 file transition probabilities before parsing/expansion...")
+for chr in chromosomes:
+    analyze_cc_h5("tranprob.CC.G20.F.h5", chr)
+    
+# h5 files are perfect, parsing function is where things are going wrong     
+```
+
+## 5. Parse 8x8 to 36x36
+
+```{r}
+#parse_h5_transprob_to_npz.py
+# run in Terminal 
+
+# Make script executable
+#chmod +x cc_parser.py
+
+# Run for female file
+#  python cc_parser.py -t tranprob.CC.G20.F.h5 -s F -g 20
+
+# Run for male file
+#  python cc_parser.py -t tranprob.CC.G20.M.h5 -s M -g 20
+
+# feeling slighly better about this simply due to the fact that its taking a very long time to calculate the tprob epansion for each Chr 
+
+# key realization: the abundance of -744 (initalization of extremely low proabability) is actually right, considering CC are inbred, they only have reasonable homo transitions, and hence the hetero transitions are effectly impossible 
+# try using these CC files in GBRS reconstruct and see how it goes! consider G0 too as a shitty reference 
+
+# takes ~ 1hr 40 mins 
+```
+
+## 6. 36x36 QC
+
+```{python}
+# Comparing CC 8-state transprob files with GBRS_DATA DO 36-state transprob files
+
+import numpy as np
+
+def get_homo_indices(is_x=False):
+    """Get correct indices for homozygous states in 36x36 matrix"""
+    if is_x:
+        return {
+            'A': 0,   # AA
+            'B': 8,   # BB
+            'C': 15,  # CC
+            'E': 26,  # EE
+            'F': 30   # FF
+        }
+    else:
+        return {
+            'A': 0,   # AA
+            'B': 8,   # BB
+            'C': 15,  # CC
+            'D': 21,  # DD
+            'E': 26,  # EE
+            'F': 30,  # FF
+            'G': 33,  # GG
+            'H': 35   # HH
+        }
+
+def detailed_analysis(cc_file, do_file, chromosome):
+    """
+    Compare CC and DO transition probability files with correct homozygous state indexing
+    """
+    try:
+        cc_data = np.load(cc_file)
+        do_data = np.load(do_file)
+        
+        cc_array = cc_data[chromosome]
+        do_array = do_data[chromosome]
+        
+        # Basic array analysis
+        print(f"\nChromosome {chromosome}:")
+        print(f"Array dimensions:")
+        print(f"CC array shape: {cc_array.shape}")
+        print(f"DO array shape: {do_array.shape}")
+        
+        print(f"\nNumber of positions: CC={cc_array.shape[0]}, DO={do_array.shape[0]}")
+        print("Value ranges:")
+        print(f"CC - min: {np.min(cc_array):.10f}, max: {np.max(cc_array):.10f}, mean: {np.mean(cc_array):.10f}")
+        print(f"DO - min: {np.min(do_array):.10f}, max: {np.max(do_array):.10f}, mean: {np.mean(do_array):.10f}")
+        
+        print("\nPercentiles:")
+        for p in [0, 25, 50, 75, 100]:
+            print(f"{p}th percentile - CC: {np.percentile(cc_array, p):.10f}, DO: {np.percentile(do_array, p):.10f}")
+        
+        # Get correct homozygous state indices
+        homo_indices = get_homo_indices(chromosome == 'X')
+        
+        # Analyze diagonal elements
+        cc_diag = np.array([arr[np.diag_indices(36)] for arr in cc_array])
+        do_diag = np.array([arr[np.diag_indices(36)] for arr in do_array])
+        
+        print("\nDiagonal elements overall:")
+        print(f"CC - mean: {np.mean(cc_diag):.10f}, std: {np.std(cc_diag):.10f}")
+        print(f"DO - mean: {np.mean(do_diag):.10f}, std: {np.std(do_diag):.10f}")
+        
+        print("\nCC Individual diagonal means (homozygous states):")
+        for founder, idx in homo_indices.items():
+            cc_diagonal_mean = np.mean(cc_diag[:, idx])
+            print(f"CC {founder}{founder}: {cc_diagonal_mean:.10f}")
+            # Print first few values for verification
+            if founder == 'A':  # Sample check
+                print(f"  First 5 {founder}{founder} values: {cc_diag[:5, idx]}")
+            
+        print("\nDO Individual diagonal means (homozygous states):")
+        for founder, idx in homo_indices.items():
+            do_diagonal_mean = np.mean(do_diag[:, idx])
+            print(f"DO {founder}{founder}: {do_diagonal_mean:.10f}")
+        
+        # Off-diagonal analysis
+        off_diag_mask = ~np.eye(36, dtype=bool)
+        cc_off_diag_mean = np.mean([arr[off_diag_mask] for arr in cc_array])
+        do_off_diag_mean = np.mean([arr[off_diag_mask] for arr in do_array])
+        
+        print(f"\nOff-diagonal means:")
+        print(f"CC: {cc_off_diag_mean:.10f}")
+        print(f"DO: {do_off_diag_mean:.10f}")
+        print("------------------------")
+        
+    except Exception as e:
+        print(f"Error processing chromosome {chromosome}: {str(e)}")
+        import traceback
+        print(f"Stack trace:\n{traceback.format_exc()}")
+
+# Run analysis for all chromosomes
+chromosomes = [str(i) for i in range(1, 20)] + ['X']
+for chr in chromosomes:
+    detailed_analysis("tranprob.CC.G20.M.npz", "tranprob.DO.G20.M.npz", chr)
+```
+
+## DONE
+
+## 
+
+## 
