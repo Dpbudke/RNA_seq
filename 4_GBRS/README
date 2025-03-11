@@ -1,3 +1,6 @@
-Note: the working directory for running all of these scripts is in "EMASE" (full path = /90daydata/do2_projects/CCPups_redo/EMASE/), so paste there before running, or make appropriate adjustments. I moved them from my wd here for organizational sake
+This is now the complete compilation of necessary scripts to do GBRS allele-specific-expression in CC mice. Look at Rstudio/GBRS for documentation of how 
+I generated the necessary transition probabaility files for CC mice. I intend to extend GBRS to assess ASE in CCRIX mice, but need to work through generating 
+CCRIX transprob files first. 
+
 Dawson Budke
-1/30/25
+3/11/25
